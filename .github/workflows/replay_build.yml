@@ -150,7 +150,12 @@ jobs:
           echo "chart PNGs: $N"
           [ "$N" -ge 5 ] || { echo "::error::only $N chart PNG(s) - the manifest would hold this slug out"; exit 1; }
           # the charts must be PINNED too, or the card contradicts its own replay (measured: 60% vs 49.4%)
-          grep -qE "\[pin\] (charts|sweep charts) pinned" build.log || {
+          # NOTE the path: the Build step runs with working-directory: engine, so its log is at
+          # engine/build.log. Grepping bare "build.log" from the job root silently found NOTHING and
+          # failed a healthy build - the 4th time today a guard could not see its own evidence.
+          # A guard that cannot read the thing it checks is indistinguishable from the fault it guards.
+          test -f engine/build.log || { echo "::error::engine/build.log missing - cannot verify"; exit 1; }
+          grep -qE "\[pin\] (charts|sweep charts) pinned" engine/build.log || {
             echo "::error::charts rendered WITHOUT a regime pin - they would disagree with the replay"; exit 1; }
           ls -l out
 
