@@ -68,23 +68,34 @@ jobs:
       - name: Install deps
         run: pip install --quiet numpy pandas
 
-      - name: Fetch candle from coordinator
+      - name: Fetch pinned candle
         run: |
           set -euo pipefail
           CANDLE=$(python3 -c "import json;print(json.load(open('MANIFEST.json'))['candles']['${{ matrix.slug }}'])")
+          URL=$(python3 -c "import json;print(json.load(open('MANIFEST.json'))['urls']['${{ matrix.slug }}'])")
           test "$CANDLE" != "None" || { echo "::error::no candle mapped for ${{ matrix.slug }}"; exit 1; }
           mkdir -p engine/candles
-          echo "pulling $CANDLE"
-          curl -sSfL --retry 3 --retry-delay 5 \
-            "https://compute.bull4life.com/candles/$CANDLE" -o "engine/candles/$CANDLE"
+          echo "pulling $CANDLE from $URL"
+          curl -sSfL --retry 3 --retry-delay 5 "$URL" -o "engine/candles/$CANDLE"
           ls -l "engine/candles/$CANDLE"
+          # The runner holds EXACTLY ONE candle: the one the diamond's pin names. That is deliberate -
+          # the engine falls back to the newest matching file on an exact miss, so a second file here
+          # could silently change the backtest window.
 
       - name: Build bundle
         working-directory: engine
         run: |
           set -euo pipefail
           mkdir -p marketing_purpose_strategy_results/marketed
-          python tools/organize_marketing.py --only "${{ matrix.slug }}"
+          python tools/organize_marketing.py --only "${{ matrix.slug }}" 2>&1 | tee build.log
+          # HARD GUARD. The engine prints this line when the pinned candle filename was not found and it
+          # used the newest match instead - which produces a plausible but WRONG number (xag-3m-tight came
+          # back 31.3% vs the laptop's true 35.3%). A wrong bundle is worse than a failed job, so fail.
+          if grep -q "exact end-date miss" build.log; then
+            echo "::error::candle pin MISSED - refusing to publish a bundle built on the wrong window"
+            exit 1
+          fi
+          grep -q "\[pin\] regime=" build.log || { echo "::error::regime pin never applied"; exit 1; }
 
       - name: Collect
         run: |
