@@ -1,0 +1,104 @@
+name: replay_build
+
+# Engine's laptop -> fleet offload lane. The laptop pushes an ENCRYPTED job payload to the `kit` branch
+# and dispatches this workflow; each slug gets its own runner, pulls its candle from our coordinator,
+# builds the marketing bundle and uploads it as an artifact the laptop downloads with `gh run download`.
+# No Command Center in the path. See tools/fleet_offload.py in the engine repo for the laptop half.
+#
+# The repo is public (unlimited free Actions minutes) but carries no readable engine source: kit.enc is
+# AES-256 and B4L_KIT_KEY is a repo secret, which GitHub never exposes to fork PRs, and workflow_dispatch
+# requires write access. Decryption happens into the runner's own workspace and dies with the job.
+
+on:
+  workflow_dispatch:
+    inputs:
+      slugs:
+        description: "comma-separated slugs to build (must match the pushed kit)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          slugs = [s for s in os.environ["SLUGS"].replace(" ", "").split(",") if s]
+          print("matrix=" + json.dumps({"slug": slugs}))
+          PY
+        env:
+          SLUGS: ${{ inputs.slugs }}
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout payload
+        uses: actions/checkout@v4
+        with:
+          ref: kit
+
+      - name: Decrypt kit
+        env:
+          KIT_KEY: ${{ secrets.B4L_KIT_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$KIT_KEY" || { echo "::error::B4L_KIT_KEY not set on this repo"; exit 1; }
+          mkdir -p engine
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in kit.enc -out kit.tar -pass "pass:$KIT_KEY"
+          tar -xf kit.tar -C engine
+          rm -f kit.tar kit.enc
+          echo "kit files: $(find engine -type f | wc -l)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install --quiet numpy pandas
+
+      - name: Fetch candle from coordinator
+        run: |
+          set -euo pipefail
+          CANDLE=$(python3 -c "import json;print(json.load(open('MANIFEST.json'))['candles']['${{ matrix.slug }}'])")
+          test "$CANDLE" != "None" || { echo "::error::no candle mapped for ${{ matrix.slug }}"; exit 1; }
+          mkdir -p engine/candles
+          echo "pulling $CANDLE"
+          curl -sSfL --retry 3 --retry-delay 5 \
+            "https://compute.bull4life.com/candles/$CANDLE" -o "engine/candles/$CANDLE"
+          ls -l "engine/candles/$CANDLE"
+
+      - name: Build bundle
+        working-directory: engine
+        run: |
+          set -euo pipefail
+          mkdir -p marketing_purpose_strategy_results/marketed
+          python tools/organize_marketing.py --only "${{ matrix.slug }}"
+
+      - name: Collect
+        run: |
+          set -euo pipefail
+          SRC="engine/marketing_purpose_strategy_results/marketed/${{ matrix.slug }}"
+          test -s "$SRC/replay.html" || { echo "::error::no replay.html produced"; exit 1; }
+          mkdir -p out
+          for f in replay.html info.json SUMMARY.md; do
+            [ -s "$SRC/$f" ] && cp "$SRC/$f" out/ || true
+          done
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.slug }}
+          path: out/
+          retention-days: 7
