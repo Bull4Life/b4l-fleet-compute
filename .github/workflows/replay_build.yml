@@ -99,6 +99,16 @@ jobs:
           if grep -q "replay slow/failed" build.log; then
             echo "::error::replay failed - organize_marketing kept the stale bundle"; exit 1
           fi
+          # Engine components that degrade QUIETLY instead of failing. Any of these means the runner
+          # computed a different system than the laptop does, so the bundle must not be published.
+          # NOTE: "exact end-date miss" is NOT in this list. For 10 of the 24 stale slugs the laptop does
+          # not hold the pinned file either and falls back to its newest match; the laptop ships that same
+          # file, so the miss is reproduced on purpose and failing on it would block healthy slugs.
+          for pat in "\[safety\]\[WARN\]" "import FAILED"; do
+            if grep -qE "$pat" build.log; then
+              echo "::error::degraded build ($pat) - refusing to publish"; exit 1
+            fi
+          done
           echo "candle used:"; ls candles
 
       - name: Collect
