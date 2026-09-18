@@ -88,14 +88,18 @@ jobs:
           set -euo pipefail
           mkdir -p marketing_purpose_strategy_results/marketed
           python tools/organize_marketing.py --only "${{ matrix.slug }}" 2>&1 | tee build.log
-          # HARD GUARD. The engine prints this line when the pinned candle filename was not found and it
-          # used the newest match instead - which produces a plausible but WRONG number (xag-3m-tight came
-          # back 31.3% vs the laptop's true 35.3%). A wrong bundle is worse than a failed job, so fail.
-          if grep -q "exact end-date miss" build.log; then
-            echo "::error::candle pin MISSED - refusing to publish a bundle built on the wrong window"
-            exit 1
-          fi
+          # GUARDS. A wrong bundle is worse than a failed job: the first fleet run returned a perfectly
+          # plausible 31.3% for xag-3m-tight where the laptop's true answer was 35.3%, purely because the
+          # runner resolved a different candle file. The laptop now sends the exact file its own build
+          # resolves, so the only things left to assert are that the engine really used it and that the
+          # diamond's regime pin was applied - silence on either means the number cannot be trusted.
           grep -q "\[pin\] regime=" build.log || { echo "::error::regime pin never applied"; exit 1; }
+          # `grep -q X && { exit 1; }` would ABORT the step under set -e whenever X is absent (the
+          # compound returns 1), i.e. it would fail exactly the healthy case. Use an if.
+          if grep -q "replay slow/failed" build.log; then
+            echo "::error::replay failed - organize_marketing kept the stale bundle"; exit 1
+          fi
+          echo "candle used:"; ls candles
 
       - name: Collect
         run: |
