@@ -72,7 +72,9 @@ jobs:
           python-version: '3.11'
 
       - name: Install deps
-        run: pip install --quiet numpy pandas
+        # matplotlib is for the chart PNGs. The fleet CAN render them - the earlier "<5 PNGs" bundles
+        # were my own doing (builds dispatched without --render), not a runner limitation.
+        run: pip install --quiet numpy pandas matplotlib
 
       - name: Fetch pinned candle
         run: |
@@ -99,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p marketing_purpose_strategy_results/marketed
-          python tools/organize_marketing.py --only "${{ matrix.slug }}" 2>&1 | tee build.log
+          python tools/organize_marketing.py --only "${{ matrix.slug }}" --render 2>&1 | tee build.log
           # GUARDS. A wrong bundle is worse than a failed job: the first fleet run returned a perfectly
           # plausible 31.3% for xag-3m-tight where the laptop's true answer was 35.3%, purely because the
           # runner resolved a different candle file. The laptop now sends the exact file its own build
@@ -141,6 +143,15 @@ jobs:
           for f in replay.html info.json SUMMARY.md; do
             [ -s "$SRC/$f" ] && cp "$SRC/$f" out/ || true
           done
+          # Charts. The manifest holds a slug OUT when it has <5 PNGs, so a bundle that returns without
+          # them is silently unpublishable - assert rather than discover it at manifest time.
+          if [ -d "$SRC/charts" ]; then cp -r "$SRC/charts" out/; fi
+          N=$(find out -name '*.png' | wc -l)
+          echo "chart PNGs: $N"
+          [ "$N" -ge 5 ] || { echo "::error::only $N chart PNG(s) - the manifest would hold this slug out"; exit 1; }
+          # the charts must be PINNED too, or the card contradicts its own replay (measured: 60% vs 49.4%)
+          grep -qE "\[pin\] (charts|sweep charts) pinned" build.log || {
+            echo "::error::charts rendered WITHOUT a regime pin - they would disagree with the replay"; exit 1; }
           ls -l out
 
       - uses: actions/upload-artifact@v4
