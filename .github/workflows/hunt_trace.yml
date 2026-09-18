@@ -20,6 +20,7 @@ on:
       end_date:    { description: "B4L_END_DATE pin (must match the candle below)", required: true }
       candle:      { description: "candle filename the runner must use", required: true }
       candle_url:  { description: "absolute URL to fetch that candle from", required: true }
+      regime:      { description: "b4l_regime JSON the live book runs under - applied as env", required: true }
       kit_ref:     { description: "exact kit commit this run is pinned to", required: false, default: kit }
 
 permissions:
@@ -72,6 +73,22 @@ jobs:
           cp "$SRC" hunts_out/"$V"/hunter_hof.csv
           wc -l hunts_out/"$V"/hunter_hof.csv
 
+      - name: Apply the book's regime
+        working-directory: engine
+        run: |
+          set -euo pipefail
+          # WITHOUT THIS the hunt runs under AMBIENT engine settings and its rows are not comparable to
+          # anything we hold - measured on run 35378087061, which pinned only the WINDOW and produced 551
+          # rows under different physics. Same half-fix shape as the master replay: the visible pin was
+          # there, the one that shapes the numbers was not.
+          python - <<'PY' >> "$GITHUB_ENV"
+          import json, os
+          for k, v in json.loads(os.environ['REGIME_JSON']).items():
+              print(f'{k}={v}')
+          PY
+        env:
+          REGIME_JSON: ${{ inputs.regime }}
+
       - name: Traced hunt
         working-directory: engine
         env:
@@ -79,6 +96,7 @@ jobs:
           B4L_END_DATE: ${{ inputs.end_date }}
         run: |
           set -euo pipefail
+          echo "regime in effect:"; env | grep -E '^B4L_' | sort
           # -u so the guard/progress lines are visible live instead of sitting in a buffer
           python -u hunter/bull4life_hunter.py \
             --variant "${{ inputs.variant }}" \
@@ -89,6 +107,37 @@ jobs:
           if grep -q "\[GUARD\] 0 diamonds" hunt.log; then
             echo "::error::hunter blocked on the no-diamonds guard - the seed hof did not take"; exit 1
           fi
+
+      - name: Stamp the banked rows
+        working-directory: engine
+        run: |
+          set -euo pipefail
+          # Diamonds are stamped at BANKING time by the node pipeline; a fleet hunt never touches node.py,
+          # so its rows come back with no b4l_regime and data_end='None' and the marketing path rightly
+          # refuses them (measured: run 35378087061). fleet_regime.stamp() derives the regime from the
+          # ENV we just applied, so this records what actually ran - it does not invent anything.
+          python - <<'PY'
+          import os, sys, json
+          import pandas as pd
+          sys.path.insert(0, 'compute')
+          import fleet_regime as FR
+          v = os.environ['VARIANT']; p = f'hunts_out/{v}/hunter_hof.csv'
+          df = pd.read_csv(p, engine='python', on_bad_lines='skip')
+          rows = [FR.stamp(dict(r)) for r in df.to_dict('records')]
+          end = os.environ.get('B4L_END_DATE', '')
+          for r in rows:
+              if end:
+                  r['data_end'] = end
+          out = pd.DataFrame(rows)
+          out.to_csv(p, index=False)
+          good = sum(1 for r in rows if isinstance(r.get('b4l_regime'), str) and r['b4l_regime'].strip())
+          print(f'stamped {good}/{len(rows)} rows  data_end={end}')
+          if good != len(rows):
+              sys.exit('::error::some rows were not stamped')
+          PY
+        env:
+          VARIANT: ${{ inputs.variant }}
+          B4L_END_DATE: ${{ inputs.end_date }}
 
       - name: Collect
         run: |
