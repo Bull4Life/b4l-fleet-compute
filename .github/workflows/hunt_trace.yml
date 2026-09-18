@@ -1,0 +1,110 @@
+name: hunt_trace
+
+# TRACED HUNTS on the offload lane — the Dream-RSI flywheel's only possible home.
+#
+# The donate/grid fleet cannot run this. Its runners "download the COMPILED node (no source)", so
+# B4L_HUNT_TRACE — which exists only in our source — never reaches them, and commits never reach a
+# frozen binary. This lane ships the encrypted SOURCE kit, so it can run instrumented searches the grid
+# structurally cannot. That is the whole reason this workflow exists rather than reusing the grid.
+#
+# It banks EVERY candidate eval (params + score + core metrics + generation) to hunter_trace.csv so a
+# replay simulator can learn which candidates deserve an expensive backtest. The hof it produces is a
+# REFINEMENT of the seeded one — the fleet never hunts from zero (that breaks prod).
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:     { description: "hunter variant key, e.g. xag_tight_low_lev_3m_counter", required: true }
+      population:  { description: "GA population", required: false, default: "24" }
+      generations: { description: "GA generations", required: false, default: "40" }
+      end_date:    { description: "B4L_END_DATE pin (must match the candle below)", required: true }
+      candle:      { description: "candle filename the runner must use", required: true }
+      candle_url:  { description: "absolute URL to fetch that candle from", required: true }
+      kit_ref:     { description: "exact kit commit this run is pinned to", required: false, default: kit }
+
+permissions:
+  contents: read
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.kit_ref }}
+
+      - name: Decrypt kit
+        env:
+          KIT_KEY: ${{ secrets.B4L_KIT_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$KIT_KEY" || { echo "::error::B4L_KIT_KEY not set"; exit 1; }
+          mkdir -p engine
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in kit.enc -out kit.tar -pass "pass:$KIT_KEY"
+          tar -xf kit.tar -C engine
+          rm -f kit.tar kit.enc
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - name: Install deps
+        run: pip install --quiet numpy pandas
+
+      - name: Fetch pinned candle
+        run: |
+          set -euo pipefail
+          mkdir -p engine/candles
+          curl -sSfL --retry 3 --retry-delay 5 "${{ inputs.candle_url }}" -o "engine/candles/${{ inputs.candle }}"
+          ls -l "engine/candles/${{ inputs.candle }}"
+
+      - name: Seed the hunt from the shipped hof
+        working-directory: engine
+        run: |
+          set -euo pipefail
+          V="${{ inputs.variant }}"
+          mkdir -p hunts_out/"$V"
+          # The hunter BLOCKS for up to 60 min on "[GUARD] 0 diamonds ... waiting for the optimizer" when
+          # the output dir has no hof — it looks like a hang (~0 CPU, empty log). Seeding the shipped hof
+          # both satisfies the guard and enforces the fleet-REFINES rule: never hunt from zero.
+          SRC=$(find strategies/wavetrend -path "*/hunts/$V/hunter_hof.csv" | head -1)
+          test -n "$SRC" || { echo "::error::no seed hof shipped for $V"; exit 1; }
+          cp "$SRC" hunts_out/"$V"/hunter_hof.csv
+          wc -l hunts_out/"$V"/hunter_hof.csv
+
+      - name: Traced hunt
+        working-directory: engine
+        env:
+          B4L_HUNT_TRACE: "1"
+          B4L_END_DATE: ${{ inputs.end_date }}
+        run: |
+          set -euo pipefail
+          # -u so the guard/progress lines are visible live instead of sitting in a buffer
+          python -u hunter/bull4life_hunter.py \
+            --variant "${{ inputs.variant }}" \
+            --population "${{ inputs.population }}" \
+            --generations "${{ inputs.generations }}" \
+            --cores 2 --no-auto-render \
+            --output-dir hunts_out 2>&1 | tee hunt.log
+          if grep -q "\[GUARD\] 0 diamonds" hunt.log; then
+            echo "::error::hunter blocked on the no-diamonds guard - the seed hof did not take"; exit 1
+          fi
+
+      - name: Collect
+        run: |
+          set -euo pipefail
+          V="${{ inputs.variant }}"
+          D="engine/hunts_out/$V"
+          test -s "$D/hunter_trace.csv" || { echo "::error::no hunter_trace.csv produced"; exit 1; }
+          mkdir -p out
+          cp "$D/hunter_trace.csv" out/
+          [ -s "$D/hunter_hof.csv" ] && cp "$D/hunter_hof.csv" out/ || true
+          [ -s engine/hunt.log ] && tail -200 engine/hunt.log > out/hunt_tail.log || true
+          echo "trace rows: $(( $(wc -l < out/hunter_trace.csv) - 1 ))"
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hunt-${{ inputs.variant }}
+          path: out/
+          retention-days: 14
