@@ -90,6 +90,12 @@ jobs:
 
       - name: Build bundle
         working-directory: engine
+        env:
+          # organize_marketing defaults to a 3600 s replay timeout, tuned for the laptop. A 2-core
+          # runner is slower, and a 1m slug is ~500k bars: xmr-1m-tight died on TimeoutExpired at
+          # exactly that bound (run 35356264973) while xmr-1m-wide finished. The JOB allows 300 min,
+          # so the inner timeout was the only thing cutting it short.
+          B4L_REPLAY_TIMEOUT: "16000"
         run: |
           set -euo pipefail
           mkdir -p marketing_purpose_strategy_results/marketed
