@@ -15,6 +15,10 @@ on:
       slugs:
         description: "comma-separated slugs to build (must match the pushed kit)"
         required: true
+      kit_ref:
+        description: "exact kit commit sha this run is pinned to (branch `kit` is force-pushed per job)"
+        required: false
+        default: kit
 
 permissions:
   contents: read
@@ -46,7 +50,9 @@ jobs:
       - name: Checkout payload
         uses: actions/checkout@v4
         with:
-          ref: kit
+          # the exact commit, never the branch: `kit` is force-pushed on every dispatch, so a job that
+          # checks out late would otherwise pick up a LATER job's payload
+          ref: ${{ inputs.kit_ref }}
 
       - name: Decrypt kit
         env:
