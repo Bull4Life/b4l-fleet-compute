@@ -1,0 +1,71 @@
+name: curator
+
+# The research CURATOR, off Master's laptop (Master 2026-09-18: "if you can dont run him on my laptop ..
+# run him on our github cluser"). It reads the research board, drops dead-class posts mechanically, asks
+# a FREE model to rank what survives, and posts the shortlist back — all plain HTTPS, so it needs no GPU,
+# no local model and no laptop process.
+#
+# Hermes was never the heavy part: it is a CLI wrapper around a remote model. The only thing the laptop
+# ever contributed was the process itself, which is exactly what this removes.
+
+on:
+  schedule:
+    - cron: '17 */2 * * *'      # every 2h, offset off the hour so it never lands on the engine heartbeat
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "board cursor to curate from (0 = all)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: curator              # never let two curators post to the board at once
+  cancel-in-progress: false
+
+jobs:
+  curate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: kit
+
+      - name: Decrypt kit
+        env:
+          KIT_KEY: ${{ secrets.B4L_KIT_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$KIT_KEY" || { echo "::error::B4L_KIT_KEY not set"; exit 1; }
+          mkdir -p engine
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in kit.enc -out kit.tar -pass "pass:$KIT_KEY"
+          tar -xf kit.tar -C engine
+          rm -f kit.tar kit.enc
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - name: Curate
+        working-directory: engine
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CC_BASE: ${{ secrets.CC_BASE }}
+          CC_AGENT_TOKEN: ${{ secrets.CC_AGENT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$OPENROUTER_API_KEY" || { echo "::error::OPENROUTER_API_KEY not set on this repo"; exit 1; }
+          test -n "$CC_AGENT_TOKEN"     || { echo "::error::CC_AGENT_TOKEN not set on this repo"; exit 1; }
+          python -u tools/curator.py "${{ inputs.since || 0 }}" 2>&1 | tee curate.log
+          # The curator degrades QUIETLY by design (it must never break a research cycle), so assert the
+          # two things that mean it actually did its job rather than trusting exit 0.
+          if grep -q "no API key and no hermes CLI" curate.log; then
+            echo "::error::no ranking backend reachable from the runner"; exit 1
+          fi
+          if grep -q "returned EMPTY content" curate.log; then
+            echo "::error::model returned empty content - raise B4L_CURATOR_MAXTOK or lower effort"; exit 1
+          fi
+          grep -q "curated via API" curate.log || {
+            echo "::error::did NOT use the API path - it would be falling back to a laptop-only CLI"; exit 1; }
