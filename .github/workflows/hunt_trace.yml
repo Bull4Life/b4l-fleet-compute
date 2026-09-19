@@ -106,7 +106,21 @@ jobs:
           # the laptop, so nothing was seeding these hunts at all. The hof carries all 70 search-space
           # params + score, so it IS a valid seed set - and seeding FROM it is exactly the documented
           # rule that the fleet REFINES and never hunts from zero.
+          # PREFER THE COORDINATOR'S SEED SET - the same one the grid nodes pull (node.py fetches
+          # /seeds/<target_id>.csv). VERIFIED schema-identical to the hof (113 cols, all 70 search-space
+          # params, score present) and RICHER: 46 rows vs the hof's 15. Using it means the fleet hunt and
+          # the grid refine from ONE source of truth instead of two that can drift apart.
+          # Falls back to the shipped hof if the coordinator is unreachable - a seeded hunt from a
+          # smaller set still beats an unseeded one, which is what we had.
           SEED="hunts_out/${{ inputs.variant }}/hunter_hof.csv"
+          if curl -sSfL --max-time 60 \
+               "https://compute.bull4life.com/seeds/${{ inputs.variant }}.csv" -o coord_seed.csv \
+             && [ -s coord_seed.csv ]; then
+            SEED="$(pwd)/coord_seed.csv"
+            echo "seeding from the COORDINATOR: $(( $(wc -l < coord_seed.csv) - 1 )) rows"
+          else
+            echo "coordinator seed unavailable - falling back to the shipped hof"
+          fi
           python -u hunter/bull4life_hunter.py \
             --variant "${{ inputs.variant }}" \
             --population "${{ inputs.population }}" \
