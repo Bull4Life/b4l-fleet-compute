@@ -98,12 +98,28 @@ jobs:
           set -euo pipefail
           echo "regime in effect:"; env | grep -E '^B4L_' | sort
           # -u so the guard/progress lines are visible live instead of sitting in a buffer
+          # --seed-csv IS THE REFINEMENT. Without it the GA starts from a RANDOM population and merely
+          # ARCHIVES the shipped hof, so the hunt lands WORSE than its own incumbent - measured:
+          # xag best 15.76 against an incumbent 53.13, near 80.13 against 88.18, under identical regime
+          # and data_end. The tell is gen 0 opening at best=-1000000 instead of near the incumbent.
+          # The variant's declared default_seed_csv (an optimizer results CSV) does not exist even on
+          # the laptop, so nothing was seeding these hunts at all. The hof carries all 70 search-space
+          # params + score, so it IS a valid seed set - and seeding FROM it is exactly the documented
+          # rule that the fleet REFINES and never hunts from zero.
+          SEED="hunts_out/${{ inputs.variant }}/hunter_hof.csv"
           python -u hunter/bull4life_hunter.py \
             --variant "${{ inputs.variant }}" \
             --population "${{ inputs.population }}" \
             --generations "${{ inputs.generations }}" \
+            --seed-csv "$SEED" \
             --cores 2 --no-auto-render \
             --output-dir hunts_out 2>&1 | tee hunt.log
+          # PROVE the seeds took: gen 0 must not open at the reject sentinel. If it does, the hunt is
+          # exploring from zero again and its output must not be trusted as a refinement.
+          if grep -qE "^Gen +0 +best=-1000000" hunt.log; then
+            echo "::error::gen 0 opened at the reject sentinel - seeds did NOT enter the population"
+            exit 1
+          fi
           if grep -q "\[GUARD\] 0 diamonds" hunt.log; then
             echo "::error::hunter blocked on the no-diamonds guard - the seed hof did not take"; exit 1
           fi
