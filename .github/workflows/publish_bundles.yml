@@ -1,0 +1,113 @@
+name: publish_bundles
+
+# Assemble the marketing bundles ON THE FLEET and publish ONE tarball as a release asset, so the BOX
+# pulls it directly from GitHub and Master's wifi is never in the path.
+#
+# THE CONSTRAINT THAT SHAPES THIS (@site 2026-09-19): delivering ~300 MB laptop -> box is not viable -
+# 3 of 15 chunks in 30 min, each corrupting and retrying on a 343 ms intermittent link. The obvious fix,
+# "upload a tarball to a release", is the SAME 300 MB across the SAME wifi. So the laptop must not carry
+# the payload at all. The bundles were built on runners; they can be re-collected on a runner.
+#
+# It rebuilds rather than scraping old artifacts: artifacts expire (7 days), belong to specific runs, and
+# a half-expired set would publish a partial site silently. A rebuild is free here and always complete.
+#
+#   gh workflow run publish_bundles.yml -R Bull4Life/b4l-fleet-compute -f slugs=a,b,c
+# then the box:
+#   curl -sSfL -o bundles.tgz https://github.com/<repo>/releases/download/bundles/marketing_bundles.tgz
+#   tar xzf bundles.tgz -C web/public/marketing
+
+on:
+  workflow_dispatch:
+    inputs:
+      slugs:    { description: "comma-separated slugs to include", required: true }
+      kit_ref:  { description: "kit commit to build from", required: false, default: kit }
+      tag:      { description: "release tag to publish under", required: false, default: bundles }
+
+permissions:
+  contents: write            # needed to create/update the release asset
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env: { SLUGS: "${{ inputs.slugs }}" }
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          print("matrix=" + json.dumps({"slug": [s for s in os.environ["SLUGS"].replace(" ", "").split(",") if s]}))
+          PY
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy: { fail-fast: false, matrix: "${{ fromJson(needs.plan.outputs.matrix) }}" }
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.kit_ref }}" }
+      - name: Decrypt kit
+        env: { KIT_KEY: "${{ secrets.B4L_KIT_KEY }}" }
+        run: |
+          set -euo pipefail
+          mkdir -p engine
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in kit.enc -out kit.tar -pass "pass:$KIT_KEY"
+          tar -xf kit.tar -C engine && rm -f kit.tar kit.enc
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install --quiet numpy pandas matplotlib
+      - name: Fetch pinned candle
+        run: |
+          set -euo pipefail
+          C=$(python3 -c "import json;print(json.load(open('MANIFEST.json'))['candles']['${{ matrix.slug }}'])")
+          U=$(python3 -c "import json;print(json.load(open('MANIFEST.json'))['urls']['${{ matrix.slug }}'])")
+          mkdir -p engine/candles
+          curl -sSfL --retry 3 --retry-delay 5 "$U" -o "engine/candles/$C"
+      - name: Build
+        working-directory: engine
+        env: { B4L_REPLAY_TIMEOUT: "16000" }
+        run: |
+          set -euo pipefail
+          mkdir -p marketing_purpose_strategy_results/marketed
+          python tools/organize_marketing.py --only "${{ matrix.slug }}" --render 2>&1 | tee build.log
+          grep -q "bundle ready:" build.log || { echo "::error::no bundle"; exit 1; }
+      - name: Stage
+        run: |
+          set -euo pipefail
+          S="engine/marketing_purpose_strategy_results/marketed/${{ matrix.slug }}"
+          test -s "$S/replay.html" || { echo "::error::no replay"; exit 1; }
+          N=$(find "$S/charts" -name '*.png' 2>/dev/null | wc -l)
+          [ "$N" -ge 5 ] || { echo "::error::only $N PNGs"; exit 1; }
+          mkdir -p out/"${{ matrix.slug }}"
+          cp "$S"/replay.html "$S"/info.json out/"${{ matrix.slug }}"/ 2>/dev/null || true
+          [ -s "$S/SUMMARY.md" ] && cp "$S/SUMMARY.md" out/"${{ matrix.slug }}"/ || true
+          cp -r "$S/charts" out/"${{ matrix.slug }}"/
+      - uses: actions/upload-artifact@v4
+        with: { name: "b-${{ matrix.slug }}", path: out/, retention-days: 2 }
+
+  release:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: all, pattern: "b-*", merge-multiple: true }
+      - name: Tar + publish
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          set -euo pipefail
+          N=$(find all -maxdepth 1 -mindepth 1 -type d | wc -l)
+          echo "bundles collected: $N"
+          [ "$N" -gt 0 ] || { echo "::error::no bundles to publish"; exit 1; }
+          tar -czf marketing_bundles.tgz -C all .
+          ls -lh marketing_bundles.tgz
+          # a MANIFEST of what is inside, so the box can verify it got a complete set before deploying
+          find all -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | sort > bundles_index.txt
+          gh release create "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" -t "marketing bundles" \
+            -n "Marketing bundles built on the fleet. Public asset - the box pulls this directly." \
+            || true
+          gh release upload "${{ inputs.tag }}" marketing_bundles.tgz bundles_index.txt \
+            -R "$GITHUB_REPOSITORY" --clobber
+          echo "PULL: https://github.com/$GITHUB_REPOSITORY/releases/download/${{ inputs.tag }}/marketing_bundles.tgz"
