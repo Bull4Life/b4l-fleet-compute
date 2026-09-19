@@ -108,6 +108,11 @@ jobs:
           gh release create "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" -t "marketing bundles" \
             -n "Marketing bundles built on the fleet. Public asset - the box pulls this directly." \
             || true
-          gh release upload "${{ inputs.tag }}" marketing_bundles.tgz bundles_index.txt \
-            -R "$GITHUB_REPOSITORY" --clobber
+          # ORDER MATTERS. @site watches bundles_index.txt for ==100 as their ready-signal, so the
+          # INDEX MUST LAND LAST. Uploading both in one command gives NO ordering guarantee: the new
+          # index could appear while the OLD tarball is still in place, and they would burn a 300 MB
+          # pull on a bad link only for their own diff to reject it. Tarball first, index last, so
+          # "index says 100" means everything behind it is already there.
+          gh release upload "${{ inputs.tag }}" marketing_bundles.tgz -R "$GITHUB_REPOSITORY" --clobber
+          gh release upload "${{ inputs.tag }}" bundles_index.txt -R "$GITHUB_REPOSITORY" --clobber
           echo "PULL: https://github.com/$GITHUB_REPOSITORY/releases/download/${{ inputs.tag }}/marketing_bundles.tgz"
