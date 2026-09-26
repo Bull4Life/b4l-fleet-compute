@@ -1,0 +1,45 @@
+# Copy the fleet's candle release from the source repo onto THIS repo's "candles" release, runner to runner, so the
+# laptop's link carries none of it. The source repo is a secret (B4L_CANDLE_SRC) so it never appears in a public log.
+# SI-48 2026-09-26: the admin's "move them" (the fleet's candle URLs showed the source repo in public Actions logs).
+# Idempotent: an asset already present with the same size is skipped; --clobber replaces a different one.
+name: copy_candles
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: copy_candles
+  cancel-in-progress: false
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SRC: ${{ secrets.B4L_CANDLE_SRC }}
+    steps:
+      - name: Ensure the release exists here
+        run: |
+          gh release view candles -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create candles -R "$GITHUB_REPOSITORY" --title candles --notes "Public market data (OHLCV candles) for fleet jobs."
+      - name: Copy every asset that is missing or differs
+        run: |
+          set -euo pipefail
+          mkdir -p tmp
+          gh release view candles -R "$SRC" --json assets --jq '.assets[] | "\(.name) \(.size)"' > src.txt
+          gh release view candles -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.size)"' > dst.txt || true
+          n=0; skip=0
+          while read -r name size; do
+            if grep -qx "$name $size" dst.txt; then skip=$((skip+1)); continue; fi
+            gh release download candles -R "$SRC" -p "$name" -D tmp --clobber
+            gh release upload candles -R "$GITHUB_REPOSITORY" "tmp/$name" --clobber
+            rm -f "tmp/$name"; n=$((n+1))
+          done < src.txt
+          echo "copied $n, already present $skip, source total $(wc -l < src.txt)"
+      - name: Verify names and sizes match
+        run: |
+          gh release view candles -R "$SRC" --json assets --jq '[.assets[] | "\(.name) \(.size)"] | sort | .[]' > a.txt
+          gh release view candles -R "$GITHUB_REPOSITORY" --json assets --jq '[.assets[] | "\(.name) \(.size)"] | sort | .[]' > b.txt
+          missing=$(comm -23 a.txt b.txt | wc -l)
+          echo "source $(wc -l < a.txt) assets, here $(wc -l < b.txt), missing or different here: $missing"
+          test "$missing" -eq 0
