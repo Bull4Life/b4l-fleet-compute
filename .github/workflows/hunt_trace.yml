@@ -22,6 +22,12 @@ on:
       candle_url:  { description: "absolute URL to fetch that candle from", required: true }
       regime:      { description: "b4l_regime JSON the live book runs under - applied as env", required: true }
       kit_ref:     { description: "exact kit commit this run is pinned to", required: false, default: kit }
+      # 2026-09-26 (SI-48): live signals on the forming bar use the 1m price (B4L_STUB_SIGNAL + B4L_STUB_1M). Without
+      # the 1m file every hunt bar fell back to the bar OPEN ("186400 of 186400 bars use the bar open as the stub"),
+      # measured to cost the live diamonds 10-20% (run 36252086912), so hunts optimised a world live never runs.
+      # Empty = the old behaviour, unchanged. B4L_STUB_1M itself travels in the regime (stamped on every row).
+      stub_candle:     { description: "optional 1m candle filename for the signal stub", required: false, default: "" }
+      stub_candle_url: { description: "absolute URL to fetch that 1m candle from", required: false, default: "" }
 
 permissions:
   contents: read
@@ -58,6 +64,13 @@ jobs:
           mkdir -p engine/candles
           curl -sSfL --retry 3 --retry-delay 5 "${{ inputs.candle_url }}" -o "engine/candles/${{ inputs.candle }}"
           ls -l "engine/candles/${{ inputs.candle }}"
+
+      - name: Fetch the 1m stub candle
+        if: ${{ inputs.stub_candle != '' }}
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 3 --retry-delay 5 "${{ inputs.stub_candle_url }}" -o "engine/candles/${{ inputs.stub_candle }}"
+          ls -l "engine/candles/${{ inputs.stub_candle }}"
 
       - name: Seed the hunt from the shipped hof
         working-directory: engine
